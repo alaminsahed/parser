@@ -1,76 +1,99 @@
-require('dotenv').config();
-const express = require('express');
-const multer = require('multer');
-const fs = require('fs');
-const path = require('path');
-const { OpenAI } = require('openai');
+import express from "express";
+import multer from "multer";
+import fs from "fs";
+import path from "path";
+import OpenAI from "openai";
+import dotenv from "dotenv";
 
-// Initialize Express app
+dotenv.config();
+
+// Initialize OpenAI API client
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Set up Express app
 const app = express();
-const port = 3000;
+const PORT = 5000;
 
-// Set up multer for image uploads
-const upload = multer({ dest: 'uploads/' });
+// Configure multer for file uploads
+const upload = multer({ dest: "uploads/" });
 
-// Initialize OpenAI API
-const openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-});
+// Helper function to convert image to Base64
+function encodeImageToBase64(imagePath) {
+    const image = fs.readFileSync(imagePath);
+    return image.toString("base64");
+}
 
-// Route to upload an image and process it
-app.post('/upload-image', upload.single('image'), async (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ error: 'No image uploaded.' });
-    }
+// Helper function to extract JSON content from OpenAI response
+function extractJson(responseContent) {
+    const jsonStart = responseContent.indexOf("```json") + 7; // Skip "```json"
+    const jsonEnd = responseContent.lastIndexOf("```");
+    const jsonString = responseContent.slice(jsonStart, jsonEnd).trim(); // Extract JSON part
+    return JSON.parse(jsonString); // Parse JSON
+}
 
-    const imagePath = path.join(__dirname, req.file.path);
+// Function to process images with OpenAI
+async function processImages(imagePaths) {
+    const imageMessages = imagePaths.map((imagePath) => {
+        const base64Image = encodeImageToBase64(imagePath);
+        return {
+            type: "image_url",
+            image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`, // Construct Base64 Data URL
+            },
+        };
+    });
 
-    try {
-        // Generate description for the uploaded image using OpenAI
-        const description = await generateDescriptionWithOpenAI(imagePath);
-
-        // Send the JSON response with image description
-        res.json({
-            image_url: `http://localhost:3000/${req.file.path}`,
-            description,
-        });
-
-        // Clean up the uploaded image after processing
-        fs.unlinkSync(imagePath);
-    } catch (error) {
-        console.error('Error processing image:', error);
-        res.status(500).json({ error: 'Error processing the image' });
-    }
-});
-
-// Function to generate description for an image using OpenAI
-async function generateDescriptionWithOpenAI(imagePath) {
-    try {
-        const imageUrl = `http://localhost:3000/${imagePath}`; // Expose the image via HTTP (assuming local server)
-        const response = await openai.chat.completions.create({
-            model: 'gpt-4', // Use GPT-4 model
-            messages: [
-                {
-                    role: 'user',
-                    content: [
-                        { type: 'text', text: "What’s in this image?" },
-                        { type: 'image_url', image_url: { url: imageUrl } },
-                    ],
-                },
+    const messages = [
+        {
+            role: "user",
+            content: [
+                { type: "text", text: "What is in these images? Can you provide JSON data for them?" },
+                ...imageMessages,
             ],
-        });
+        },
+    ];
 
-        return response.choices[0].message.content;
+    const response = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: messages,
+    });
+
+    const rawContent = response.choices[0].message.content;
+
+    // Extract and clean up the JSON content
+    try {
+        return extractJson(rawContent);
     } catch (error) {
-        console.error('Error with OpenAI API:', error);
-        throw new Error('Error generating description with OpenAI');
+        console.error("Failed to parse JSON from OpenAI response:", error);
+        throw new Error("Invalid JSON format in OpenAI response");
     }
 }
 
-// Serve uploaded images (temporary)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// API endpoint to upload images
+app.post("/upload", upload.array("images", 10), async (req, res) => {
+    try {
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ error: "No files uploaded" });
+        }
+
+        // Get uploaded file paths
+        const imagePaths = req.files.map((file) => file.path);
+
+        // Process images with OpenAI
+        const cleanedJsonResponse = await processImages(imagePaths);
+
+        // Clean up uploaded files
+        req.files.forEach((file) => fs.unlinkSync(file.path));
+
+        // Respond with cleaned JSON data
+        res.status(200).json({ data: cleanedJsonResponse });
+    } catch (error) {
+        console.error("Error processing images:", error);
+        res.status(500).json({ error: "Failed to process images" });
+    }
+});
 
 // Start the server
-app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
+app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
 });
